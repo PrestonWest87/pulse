@@ -1,0 +1,32 @@
+services:
+  web:
+    build: .
+    command: streamlit run src/app.py --server.port=8501 --server.address=0.0.0.0
+    ports:
+      - "8501:8501"
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+
+  worker:
+    build: .
+    command: python -u src/scheduler.py
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  webhook:
+    build: .
+    command: python -u src/webhook_listener.py
+    ports:
+      - "8100:8100"
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
