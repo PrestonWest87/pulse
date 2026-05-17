@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import time
 import json
+import plotly.express as px
 from streamlit_cookies_controller import CookieController
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -103,6 +104,22 @@ if page == "Feed":
 
     items = svc.get_recent_items(limit=200, source_id=None if filter_src == 0 else filter_src)
 
+    # Trend chart
+    with st.expander("Trends (items collected per day)", expanded=False):
+        all_items = svc.get_recent_items(limit=2000)
+        if all_items:
+            df = pd.DataFrame([{
+                "date": (i.published_at or i.collected_at).strftime("%Y-%m-%d") if (i.published_at or i.collected_at) else "Unknown",
+                "source": i.source_name,
+            } for i in all_items if (i.published_at or i.collected_at)])
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"])
+                chart = df.groupby(["date", "source"]).size().reset_index(name="count")
+                fig = px.bar(chart, x="date", y="count", color="source",
+                             title="Items Collected Over Time",
+                             labels={"count": "Items", "date": "Date"})
+                st.plotly_chart(fig, use_container_width=True)
+
     if not items:
         st.info("No data collected yet. Add a **Source** to start collecting.")
     else:
@@ -137,14 +154,16 @@ elif page == "Sources":
 
     with tab_add:
         st.subheader("New Data Source")
+
+        col_types = get_all_collector_types()
+        type_map = {t["type_id"]: t for t in col_types}
+        type_choice = st.selectbox("Collector Type", options=list(type_map.keys()),
+                                   format_func=lambda x: f"{type_map[x]['name']} — {type_map[x]['description']}",
+                                   key="collector_type_sel")
+
         with st.form("add_source"):
             name = st.text_input("Source Name", placeholder="Hacker News, PyPI requests, etc.")
             description = st.text_area("Description (optional)", "")
-
-            col_types = get_all_collector_types()
-            type_map = {t["type_id"]: t for t in col_types}
-            type_choice = st.selectbox("Collector Type", options=list(type_map.keys()),
-                                       format_func=lambda x: f"{type_map[x]['name']} — {type_map[x]['description']}")
 
             schema = type_map[type_choice]["config_schema"]
             st.markdown("**Configuration**")
@@ -320,7 +339,7 @@ elif page == "Alerts":
 # NOTIFICATIONS PAGE
 # ==========================================
 elif page == "Notifications":
-    tab_ch, tab_rules = st.tabs(["Channels", "Rules"])
+    tab_ch, tab_rules, tab_esc = st.tabs(["Channels", "Rules", "Escalation"])
 
     with tab_ch:
         with st.expander("Add Channel", expanded=False):
@@ -385,12 +404,45 @@ elif page == "Notifications":
                 svc.delete_rule(r.id)
                 safe_rerun()
 
+    with tab_esc:
+        st.subheader("Escalation Policies")
+        with st.expander("Add Policy", expanded=False):
+            with st.form("add_esc"):
+                esc_name = st.text_input("Name")
+                rules_list = svc.get_rules()
+                rule_opts = {r.id: r.name for r in rules_list}
+                esc_rule = st.selectbox("Notification Rule", options=list(rule_opts.keys()),
+                                        format_func=lambda x: rule_opts[x]) if rule_opts else None
+                channels = svc.get_channels()
+                ch_opts = {c.id: c.name for c in channels}
+                esc_ch = st.selectbox("Escalate to Channel", options=list(ch_opts.keys()),
+                                      format_func=lambda x: ch_opts[x]) if ch_opts else None
+                esc_delay = st.number_input("Delay (minutes before escalation)", 1, 120, 15)
+                if st.form_submit_button("Create", type="primary"):
+                    if not esc_rule or not esc_ch:
+                        st.error("Create a rule and channel first")
+                    else:
+                        svc.create_escalation_policy(esc_name, esc_rule, esc_ch, esc_delay)
+                        st.success("Escalation policy created")
+                        safe_rerun()
+
+        for ep in svc.get_escalation_policies():
+            cols = st.columns([4, 1])
+            with cols[0]:
+                rn = next((r.name for r in rules_list if r.id == ep.rule_id), "?") if ep.rule_id else "?"
+                cn = next((c.name for c in channels if c.id == ep.target_channel_id), "?")
+                st.markdown(f"**{ep.name}** — Rule: {rn} → {cn} after {ep.delay_minutes}m")
+            with cols[1]:
+                if st.button("Delete", key=f"epd_{ep.id}"):
+                    svc.delete_escalation_policy(ep.id)
+                    safe_rerun()
+
 
 # ==========================================
 # SETTINGS
 # ==========================================
 elif page == "Settings":
-    tab_sys, tab_users = st.tabs(["System", "Users"])
+    tab_sys, tab_mw, tab_digest, tab_users = st.tabs(["System", "Maintenance", "Digests", "Users"])
 
     with tab_sys:
         cfg = svc.get_cached_config()
@@ -417,6 +469,84 @@ elif page == "Settings":
                                   llm_endpoint=llm_ep, llm_model_name=llm_md)
                 st.success("Saved")
                 safe_rerun()
+
+    with tab_mw:
+        st.subheader("Maintenance Windows")
+        st.caption("During a maintenance window, alerts for the selected source are suppressed.")
+        with st.expander("Add Window", expanded=False):
+            with st.form("add_mw"):
+                mw_name = st.text_input("Name")
+                sources = svc.get_sources()
+                mw_src_opts = {0: "All Sources"}
+                mw_src_opts.update({s.id: s.name for s in sources})
+                mw_src = st.selectbox("Source", options=list(mw_src_opts.keys()),
+                                      format_func=lambda x: mw_src_opts[x])
+                col_m1, col_m2 = st.columns(2)
+                with col_m1:
+                    mw_start = st.text_input("Start time (HH:MM)", "22:00")
+                with col_m2:
+                    mw_end = st.text_input("End time (HH:MM)", "06:00")
+                mw_days = st.multiselect("Days of week (leave empty for daily)",
+                                         ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                                         default=["Mon", "Tue", "Wed", "Thu", "Fri"])
+                day_map = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
+                if st.form_submit_button("Create", type="primary"):
+                    svc.create_maintenance_window(
+                        mw_name, mw_start, mw_end,
+                        days_of_week=[day_map[d] for d in mw_days],
+                        source_id=None if mw_src == 0 else mw_src,
+                    )
+                    st.success("Maintenance window created")
+                    safe_rerun()
+
+        for mw in svc.get_maintenance_windows():
+            sn = next((s.name for s in sources if s.id == mw.source_id), "All") if mw.source_id else "All"
+            days_str = ", ".join([k for k, v in day_map.items() if v in (mw.days_of_week or [])]) or "Daily"
+            st.markdown(f"**{mw.name}** — {sn} | {mw.start_time}-{mw.end_time} | {days_str} | {'✅' if mw.enabled else '⏸'}")
+            cols = st.columns([1, 1])
+            with cols[0]:
+                if st.button("ON/OFF", key=f"mwt_{mw.id}"):
+                    svc.toggle_maintenance_window(mw.id)
+                    safe_rerun()
+            with cols[1]:
+                if st.button("Delete", key=f"mwd_{mw.id}"):
+                    svc.delete_maintenance_window(mw.id)
+                    safe_rerun()
+
+    with tab_digest:
+        st.subheader("LLM Digest Configuration")
+        st.caption("Generate AI summaries of recent collected items on a schedule.")
+        for dc in svc.get_digest_configs():
+            with st.expander(f"{dc.name} ({'✅ Enabled' if dc.enabled else '⏸ Disabled'})", expanded=False):
+                with st.form(f"digest_{dc.id}"):
+                    dc_name = st.text_input("Name", value=dc.name)
+                    dc_en = st.toggle("Enabled", value=bool(dc.enabled))
+                    dc_int = st.number_input("Interval (minutes)", 60, 10080, value=dc.interval_minutes or 1440)
+                    dc_max = st.number_input("Max items", 10, 500, value=dc.max_items or 50)
+                    src_opts_d = {0: "All Sources"}
+                    src_opts_d.update({s.id: s.name for s in svc.get_sources()})
+                    dc_srcs = st.multiselect("Sources (leave empty for all)",
+                                             options=list(src_opts_d.keys()),
+                                             default=dc.source_ids or [],
+                                             format_func=lambda x: src_opts_d[x])
+                    if st.form_submit_button("Save"):
+                        svc.update_digest_config(dc.id, name=dc_name, enabled=dc_en,
+                                                  interval_minutes=dc_int, max_items=dc_max,
+                                                  source_ids=[s for s in dc_srcs if s != 0])
+                        safe_rerun()
+                    if st.form_submit_button("Delete", type="secondary"):
+                        svc.delete_digest_config(dc.id)
+                        safe_rerun()
+
+        with st.expander("Create New Digest", expanded=False):
+            with st.form("add_digest"):
+                nd_name = st.text_input("Name", "Daily Digest")
+                nd_int = st.number_input("Interval (minutes)", 60, 10080, 1440)
+                nd_max = st.number_input("Max items", 10, 500, 50)
+                if st.form_submit_button("Create", type="primary"):
+                    svc.create_digest_config(nd_name, nd_int, nd_max)
+                    st.success("Digest created")
+                    safe_rerun()
 
     with tab_users:
         with st.form("chpw"):

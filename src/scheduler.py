@@ -130,6 +130,30 @@ if __name__ == "__main__":
     import threading
     threading.Thread(target=background_reloader, daemon=True).start()
 
+    # Run digests every 5 minutes
+    def digest_loop():
+        from src.services import run_digests
+        while True:
+            time.sleep(300)
+            try:
+                run_digests()
+            except Exception as e:
+                log(f"Digest error: {e}", "DIGEST")
+
+    threading.Thread(target=digest_loop, daemon=True).start()
+
+    # Check escalations every 2 minutes
+    def escalation_loop():
+        from src.services import check_escalations
+        while True:
+            time.sleep(120)
+            try:
+                check_escalations()
+            except Exception as e:
+                log(f"Escalation check error: {e}", "ESCALATION")
+
+    threading.Thread(target=escalation_loop, daemon=True).start()
+
     log("Scheduler online. Collecting data...")
     while True:
         schedule.run_pending()

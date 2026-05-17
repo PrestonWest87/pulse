@@ -45,7 +45,7 @@ class User(Base):
 # DATA SOURCES (what we collect from)
 # ==========================================
 
-COLLECTOR_TYPES = ["rss", "web_page", "release_tracker", "http_endpoint"]
+COLLECTOR_TYPES = ["rss", "web_page", "release_tracker", "http_endpoint", "steam", "reddit", "price_tracker", "git_commits"]
 
 class Source(Base):
     __tablename__ = "sources"
@@ -154,6 +154,54 @@ class NotificationRule(Base):
 
 
 # ==========================================
+# MAINTENANCE WINDOWS (silence rules)
+# ==========================================
+
+class MaintenanceWindow(Base):
+    __tablename__ = "maintenance_windows"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String)
+    source_id = Column(Integer, ForeignKey("sources.id"), nullable=True, index=True)
+    start_time = Column(String)  # "HH:MM"
+    end_time = Column(String)    # "HH:MM"
+    days_of_week = Column(JSON, default=list)  # 0=Mon..6=Sun
+    timezone = Column(String, default="UTC")
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ==========================================
+# ESCALATION POLICIES
+# ==========================================
+
+class EscalationPolicy(Base):
+    __tablename__ = "escalation_policies"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String)
+    rule_id = Column(Integer, ForeignKey("notification_rules.id"), nullable=True, index=True)
+    delay_minutes = Column(Integer, default=15)
+    target_channel_id = Column(Integer, ForeignKey("notification_channels.id"))
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ==========================================
+# DIGEST CONFIG (LLM summaries)
+# ==========================================
+
+class DigestConfig(Base):
+    __tablename__ = "digest_configs"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, default="Daily Digest")
+    enabled = Column(Boolean, default=False)
+    interval_minutes = Column(Integer, default=1440)
+    max_items = Column(Integer, default=50)
+    source_ids = Column(JSON, default=list)
+    last_run_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ==========================================
 # SYSTEM CONFIG
 # ==========================================
 
@@ -189,6 +237,40 @@ class Keyword(Base):
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+
+    # Migrate old NOC-era schema if detected
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        # Rename/migrate notification_rules columns
+        try:
+            pragma = conn.execute(text("PRAGMA table_info(notification_rules)")).fetchall()
+            old_cols = {r[1] for r in pragma}
+            if "monitor_id" in old_cols and "source_id" not in old_cols:
+                conn.execute(text("ALTER TABLE notification_rules RENAME COLUMN monitor_id TO source_id"))
+                conn.commit()
+        except Exception:
+            pass
+
+        # Migrate alerts table (old NOC schema had monitor_name, check_id, etc.)
+        try:
+            pragma = conn.execute(text("PRAGMA table_info(alerts)")).fetchall()
+            old_cols = {r[1]: r[2] for r in pragma}
+            migrations_alerts = [
+                ("monitor_name", "source_name", "VARCHAR"),
+                ("monitor_id", "source_id", "INTEGER"),
+            ]
+            for old_c, new_c, ctype in migrations_alerts:
+                if old_c in old_cols and new_c not in old_cols:
+                    conn.execute(text(f"ALTER TABLE alerts RENAME COLUMN {old_c} TO {new_c}"))
+                    conn.commit()
+            # Add columns that never existed in old schema
+            for col_name, ctype in [("item_id", "INTEGER"), ("item_title", "VARCHAR")]:
+                if col_name not in old_cols:
+                    conn.execute(text(f"ALTER TABLE alerts ADD COLUMN {col_name} {ctype}"))
+                    conn.commit()
+        except Exception:
+            pass
+
     with SessionLocal() as session:
         existing = session.query(User).filter_by(username="admin").first()
         if not existing:

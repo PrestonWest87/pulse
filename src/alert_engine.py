@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
-from src.database import SessionLocal, Alert, NotificationChannel, NotificationRule, Source, CollectedItem
+from src.database import SessionLocal, Alert, NotificationChannel, NotificationRule, Source, CollectedItem, MaintenanceWindow
 from src.outbounds import get_outbound
+from src.services import is_in_maintenance_window
 import logging
 
 logger = logging.getLogger("alert_engine")
@@ -18,6 +19,11 @@ def _keyword_matches(text: str, keywords: list[str]) -> list[str]:
 def evaluate_items(source, items: list):
     keywords = source.alert_on_keywords or []
     if not keywords:
+        return
+
+    # Suppress alerts during maintenance windows
+    if is_in_maintenance_window(source.id):
+        logger.info(f"Suppressed alerts for '{source.name}' — inside maintenance window")
         return
 
     with SessionLocal() as db:
