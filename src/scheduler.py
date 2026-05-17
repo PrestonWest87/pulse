@@ -107,13 +107,32 @@ def run_collector(source_id: int):
 
 
 def reload_schedule():
-    schedule.clear()
+    with SessionLocal() as db:
+        active_ids = {src.id for src in db.query(Source).filter_by(enabled=True).all()}
+
+    # Cancel jobs for deleted/disabled sources
+    for job in list(schedule.get_jobs()):
+        tag = next(iter(job.tags)) if job.tags else None
+        if tag and tag.startswith("src_"):
+            src_id = int(tag.split("_")[1])
+            if src_id not in active_ids:
+                schedule.cancel_job(job)
+
+    # Add missing jobs
+    scheduled_ids = set()
+    for job in schedule.get_jobs():
+        tag = next(iter(job.tags)) if job.tags else None
+        if tag and tag.startswith("src_"):
+            scheduled_ids.add(int(tag.split("_")[1]))
+
     with SessionLocal() as db:
         sources = db.query(Source).filter_by(enabled=True).all()
         for src in sources:
-            interval = max(src.interval_seconds or 900, 60)
-            schedule.every(interval).seconds.do(run_collector, src.id)
-            log(f"Scheduled: {src.name} [{src.collector_type}] every {interval}s")
+            if src.id not in scheduled_ids:
+                interval = max(src.interval_seconds or 900, 60)
+                job = schedule.every(interval).seconds.do(run_collector, src.id)
+                job.tag(f"src_{src.id}")
+                log(f"Scheduled: {src.name} [{src.collector_type}] every {interval}s")
     log(f"Loaded {len(sources)} active sources")
 
 
