@@ -115,10 +115,14 @@ if page == "Feed":
             if not df.empty:
                 df["date"] = pd.to_datetime(df["date"])
                 chart = df.groupby(["date", "source"]).size().reset_index(name="count")
-                fig = px.bar(chart, x="date", y="count", color="source",
-                             title="Items Collected Over Time",
-                             labels={"count": "Items", "date": "Date"})
-                st.plotly_chart(fig, use_container_width=True)
+                try:
+                    fig = px.bar(chart, x="date", y="count", color="source",
+                                 title="Items Collected Over Time",
+                                 labels={"count": "Items", "date": "Date"})
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception:
+                    pivot = chart.pivot_table(index="date", columns="source", values="count", fill_value=0)
+                    st.bar_chart(pivot)
 
     if not items:
         st.info("No data collected yet. Add a **Source** to start collecting.")
