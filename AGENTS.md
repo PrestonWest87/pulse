@@ -1,17 +1,17 @@
-# Pulse — Universal Monitor & Alerting Platform
+# Pulse — Data Collector
 
 ## Overview
 
-General-purpose monitoring platform. Monitors anything via plugins and alerts via multiple channels.
+Collect data from RSS feeds, web pages, release trackers (GitHub/PyPI/npm), and HTTP endpoints. Everything collected is stored, searchable, and can trigger alerts on keyword matches.
 
 ## Architecture
 
-- **Frontend** (`src/app.py`): Streamlit dashboard on port 8501
-- **Worker** (`src/scheduler.py`): Background scheduler for periodic checks
-- **Webhook** (`src/webhook_listener.py`): FastAPI gateway on port 8100
-- **Database**: SQLite (default) or PostgreSQL (set `DATABASE_URL` in `.env`)
+- **Frontend** (`src/app.py`): Streamlit — Feed, Sources, Search, Alerts
+- **Worker** (`src/scheduler.py`): Background collector scheduler
+- **Webhook** (`src/webhook_listener.py`): FastAPI inbound data gateway (port 8100)
+- **Database**: SQLite (default) or PostgreSQL
 
-## Developer Commands
+## Commands
 
 ```bash
 docker compose up --build -d
@@ -24,53 +24,58 @@ docker compose restart worker
 
 | File | Purpose |
 |------|---------|
-| `src/app.py` | Streamlit UI entrypoint |
-| `src/services.py` | Data Access Layer (DAL) |
-| `src/database.py` | SQLAlchemy models and init |
-| `src/scheduler.py` | Background task scheduler |
-| `src/alert_engine.py` | Alert evaluation and dispatch |
-| `src/monitors/__init__.py` | Base Monitor plugin class |
-| `src/notifiers/__init__.py` | Base Notifier plugin class |
-| `src/llm.py` | LLM integration |
-| `src/mailer.py` | SMTP mailer |
+| `src/app.py` | Streamlit UI |
+| `src/services.py` | Data access layer |
+| `src/database.py` | Models: Source, CollectedItem, Alert, etc. |
+| `src/scheduler.py` | Background collector scheduler |
+| `src/alert_engine.py` | Keyword matching + alert dispatch |
+| `src/collectors/` | Collector plugins |
+| `src/outbounds/` | Notification channel plugins |
 
-## Monitor Types
+## Collector Types
 
-| Type | File | Description |
+| Type | File | Collects |
+|------|------|----------|
+| rss | `src/collectors/rss.py` | RSS/Atom feed entries |
+| web_page | `src/collectors/web_page.py` | Web page content snapshots |
+| release_tracker | `src/collectors/release_tracker.py` | GitHub, PyPI, npm, Docker releases |
+| http_endpoint | `src/collectors/http_endpoint.py` | Any HTTP API/endpoint response |
+
+## Outbound Channels
+
+| Type | File | Destination |
 |------|------|-------------|
-| rss | `src/monitors/rss.py` | RSS/Atom feed polling |
-| http_status | `src/monitors/http_status.py` | HTTP status code check |
-| http_json | `src/monitors/http_json.py` | REST API JSON evaluation |
-| web_scrape | `src/monitors/web_scrape.py` | Web content scraping |
-| tcp_ping | `src/monitors/tcp_ping.py` | TCP port connectivity |
-| script | `src/monitors/script.py` | Shell command execution |
-| webhook_in | `src/webhook_listener.py` | Inbound webhook receiver |
+| webhook | `src/outbounds/webhook.py` | POST to any URL |
+| slack | `src/outbounds/slack.py` | Slack webhook |
+| discord | `src/outbounds/discord.py` | Discord webhook |
+| twilio_sms | `src/outbounds/twilio_sms.py` | SMS via Twilio |
+| email | `src/outbounds/email.py` | SMTP email |
 
-## Notification Channels
+## Collection Flow
 
-| Type | File | Description |
-|------|------|-------------|
-| webhook | `src/notifiers/webhook.py` | Outbound webhook POST |
-| slack | `src/notifiers/slack.py` | Slack webhook integration |
-| discord | `src/notifiers/discord.py` | Discord webhook with embeds |
-| twilio_sms | `src/notifiers/twilio_sms.py` | Twilio SMS |
-| email | `src/notifiers/email.py` | SMTP email |
+1. Scheduler calls `collect()` on each enabled Source at its interval
+2. Collector returns `CollectionResult(items=[...])`
+3. New items are deduplicated by content hash and saved as `CollectedItem`
+4. If source has `alert_on_keywords`, items are scanned and alerts fire
+5. Alerts route through notification rules to outbound channels
+
+## Adding a New Collector
+
+```python
+from src.collectors import BaseCollector, CollectionResult, CollectedData, register_collector
+
+@register_collector
+class MyCollector(BaseCollector):
+    type_id = "my_type"
+    name = "My Collector"
+    config_schema = {"api_key": {"type": "string", "label": "API Key", "required": True}}
+
+    def collect(self) -> CollectionResult:
+        # ... fetch data ...
+        return CollectionResult(status="success", items=[CollectedData(title="...", content="...")])
+```
 
 ## Default Credentials
 
 - Login: `admin` / `admin123`
-- Webhook (inbound): `POST http://localhost:8100/webhook/{monitor_name}`
-
-## Adding New Monitor Types
-
-1. Create a new file in `src/monitors/`
-2. Subclass `BaseMonitor`, set `type_id`, `name`, `config_schema`
-3. Implement `check()` returning `MonitorResult`
-4. Decorate with `@register_monitor`
-
-## Adding New Notification Channels
-
-1. Create a new file in `src/notifiers/`
-2. Subclass `BaseNotifier`, set `channel_type`, `name`, `config_schema`
-3. Implement `send()` returning `NotificationResult`
-4. Decorate with `@register_notifier`
+- Ingest webhook: `POST http://localhost:8100/ingest/{source_name}`

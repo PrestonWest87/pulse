@@ -1,10 +1,7 @@
 import os
 import bcrypt
-import time
-import random
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Float, Boolean, JSON, event, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
-from sqlalchemy import text
 from datetime import datetime
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////app/data/pulse.db").strip().strip('"').strip("'")
@@ -31,7 +28,7 @@ Base = declarative_base()
 
 
 # ==========================================
-# AUTH & SYSTEM
+# AUTH
 # ==========================================
 
 class User(Base):
@@ -43,86 +40,95 @@ class User(Base):
     session_token = Column(String, nullable=True, index=True)
     full_name = Column(String, nullable=True)
 
-class SystemConfig(Base):
-    __tablename__ = "system_config"
-    id = Column(Integer, primary_key=True, index=True)
-    smtp_enabled = Column(Boolean, default=False)
-    smtp_server = Column(String, nullable=True)
-    smtp_port = Column(Integer, default=587)
-    smtp_sender = Column(String, nullable=True)
-    smtp_username = Column(String, nullable=True)
-    smtp_password = Column(String, nullable=True)
-    smtp_recipient = Column(String, nullable=True)
-    llm_endpoint = Column(String, nullable=True)
-    llm_api_key = Column(String, nullable=True)
-    llm_model_name = Column(String, default="gpt-3.5-turbo")
-    last_risk_alert_time = Column(DateTime, nullable=True)
-    last_risk_level = Column(String, default="GREEN")
-
 
 # ==========================================
-# MONITOR SYSTEM
+# DATA SOURCES (what we collect from)
 # ==========================================
 
-MONITOR_TYPES = [
-    "rss", "http_status", "http_json", "web_scrape",
-    "tcp_ping", "script", "webhook_in"
-]
+COLLECTOR_TYPES = ["rss", "web_page", "release_tracker", "http_endpoint"]
 
-ALERT_SEVERITIES = ["info", "warning", "critical"]
-ALERT_STATUSES = ["triggered", "acknowledged", "resolved", "suppressed"]
-
-class Monitor(Base):
-    __tablename__ = "monitors"
+class Source(Base):
+    __tablename__ = "sources"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
     description = Column(Text, default="")
-    monitor_type = Column(String, index=True)
+    collector_type = Column(String, index=True)
     config = Column(JSON, default=dict)
-    interval_seconds = Column(Integer, default=300)
+    interval_seconds = Column(Integer, default=900)
     enabled = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    last_check_at = Column(DateTime, nullable=True)
+    last_run_at = Column(DateTime, nullable=True)
     last_status = Column(String, default="never")
-    last_response_time_ms = Column(Float, nullable=True)
     last_error = Column(Text, nullable=True)
-    last_response_summary = Column(Text, nullable=True)
-    alert_on = Column(JSON, default=lambda: ["down", "error"])
-    severity = Column(String, default="warning")
+    alert_on_keywords = Column(JSON, default=list)
+    alert_severity = Column(String, default="info")
 
-    checks = relationship("MonitorCheck", back_populates="monitor", cascade="all, delete-orphan",
-                          order_by="MonitorCheck.checked_at.desc()")
+    runs = relationship("CollectionRun", back_populates="source", cascade="all, delete-orphan",
+                        order_by="CollectionRun.run_at.desc()")
+    items = relationship("CollectedItem", back_populates="source", cascade="all, delete-orphan",
+                         order_by="CollectedItem.published_at.desc()")
 
-class MonitorCheck(Base):
-    __tablename__ = "monitor_checks"
+
+class CollectionRun(Base):
+    __tablename__ = "collection_runs"
     id = Column(Integer, primary_key=True, index=True)
-    monitor_id = Column(Integer, ForeignKey("monitors.id"), index=True)
+    source_id = Column(Integer, ForeignKey("sources.id"), index=True)
     status = Column(String)
-    status_code = Column(Integer, nullable=True)
-    response_time_ms = Column(Float, nullable=True)
+    items_found = Column(Integer, default=0)
+    items_new = Column(Integer, default=0)
     response_summary = Column(Text, nullable=True)
     error = Column(Text, nullable=True)
+    duration_ms = Column(Float, nullable=True)
+    run_at = Column(DateTime, default=datetime.utcnow)
+
+    source = relationship("Source", back_populates="runs")
+
+
+class CollectedItem(Base):
+    __tablename__ = "collected_items"
+    id = Column(Integer, primary_key=True, index=True)
+    source_id = Column(Integer, ForeignKey("sources.id"), index=True)
+    source_name = Column(String, index=True)
+    source_type = Column(String, index=True)
+
+    title = Column(String, index=True)
+    content = Column(Text, nullable=True)
+    url = Column(String, nullable=True)
+    author = Column(String, nullable=True)
+
+    published_at = Column(DateTime, nullable=True, index=True)
+    collected_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    content_hash = Column(String, nullable=True, index=True)
     raw_data = Column(JSON, nullable=True)
-    checked_at = Column(DateTime, default=datetime.utcnow, index=True)
 
-    monitor = relationship("Monitor", back_populates="checks")
+    is_read = Column(Boolean, default=False)
+    is_flagged = Column(Boolean, default=False)
 
+    source = relationship("Source", back_populates="items")
+
+
+# ==========================================
+# ALERTS & NOTIFICATIONS
+# ==========================================
+
+ALERT_STATUSES = ["triggered", "acknowledged", "resolved"]
 
 class Alert(Base):
     __tablename__ = "alerts"
     id = Column(Integer, primary_key=True, index=True)
-    monitor_id = Column(Integer, ForeignKey("monitors.id"), index=True, nullable=True)
-    monitor_name = Column(String, nullable=True)
-    severity = Column(String, default="warning")
+    source_id = Column(Integer, ForeignKey("sources.id"), index=True, nullable=True)
+    source_name = Column(String, nullable=True)
+    item_id = Column(Integer, nullable=True)
+    item_title = Column(String, nullable=True)
+    severity = Column(String, default="info")
     status = Column(String, default="triggered")
     title = Column(String)
     message = Column(Text)
-    check_id = Column(Integer, nullable=True)
-    acknowledged_at = Column(DateTime, nullable=True)
-    acknowledged_by = Column(String, nullable=True)
-    resolved_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    acknowledged_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
 
 
 class NotificationChannel(Base):
@@ -139,24 +145,36 @@ class NotificationRule(Base):
     __tablename__ = "notification_rules"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String)
-    monitor_id = Column(Integer, ForeignKey("monitors.id"), nullable=True)
+    source_id = Column(Integer, ForeignKey("sources.id"), nullable=True)
     channel_id = Column(Integer, ForeignKey("notification_channels.id"))
-    min_severity = Column(String, default="warning")
+    min_severity = Column(String, default="info")
     cooldown_minutes = Column(Integer, default=5)
     enabled = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
 # ==========================================
-# LEGACY (adapted from NOC)
+# SYSTEM CONFIG
 # ==========================================
 
-class FeedSource(Base):
-    __tablename__ = "feed_sources"
+class SystemConfig(Base):
+    __tablename__ = "system_config"
     id = Column(Integer, primary_key=True, index=True)
-    url = Column(String, unique=True, index=True)
-    name = Column(String)
-    is_active = Column(Boolean, default=True)
+    smtp_enabled = Column(Boolean, default=False)
+    smtp_server = Column(String, nullable=True)
+    smtp_port = Column(Integer, default=587)
+    smtp_sender = Column(String, nullable=True)
+    smtp_username = Column(String, nullable=True)
+    smtp_password = Column(String, nullable=True)
+    smtp_recipient = Column(String, nullable=True)
+    llm_endpoint = Column(String, nullable=True)
+    llm_api_key = Column(String, nullable=True)
+    llm_model_name = Column(String, default="gpt-3.5-turbo")
+
+
+# ==========================================
+# LEGACY (kept for backward compat)
+# ==========================================
 
 class Keyword(Base):
     __tablename__ = "keywords"

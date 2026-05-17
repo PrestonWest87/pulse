@@ -6,16 +6,16 @@ services:
       - "8501:8501"
     env_file: .env
     volumes:
-      - ./src:/app/src
-      - ./data:/app/data
+      - ./src:/app/src:ro
+      - pulse_data:/app/data
 
   worker:
     build: .
     command: python -u src/scheduler.py
     env_file: .env
     volumes:
-      - ./src:/app/src
-      - ./data:/app/data
+      - ./src:/app/src:ro
+      - pulse_data:/app/data
     deploy:
       resources:
         limits:
@@ -28,5 +28,8 @@ services:
       - "8100:8100"
     env_file: .env
     volumes:
-      - ./src:/app/src
-      - ./data:/app/data
+      - ./src:/app/src:ro
+      - pulse_data:/app/data
+
+volumes:
+  pulse_data:

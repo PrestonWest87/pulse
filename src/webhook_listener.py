@@ -2,13 +2,11 @@ import json
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from datetime import datetime
-
-from src.database import SessionLocal, init_db, Monitor, MonitorCheck, Alert
-from src.monitors import get_monitor
-from src.alert_engine import evaluate_and_alert
+from src.database import SessionLocal, init_db, Source, CollectedItem
+from src.alert_engine import evaluate_items
 
 init_db()
-app = FastAPI(title="Pulse Webhook Gateway")
+app = FastAPI(title="Pulse Webhook — Inbound Data Gateway")
 
 
 def log(msg):
@@ -20,48 +18,41 @@ def health():
     return {"status": "ok", "service": "pulse-webhook", "timestamp": datetime.utcnow().isoformat()}
 
 
-@app.post("/webhook/{monitor_name}")
-async def receive_webhook(monitor_name: str, request: Request):
-    """
-    Generic inbound webhook receiver.
-    Create a monitor with type 'webhook_in' and matching name,
-    then POST here with any payload.
-    """
+@app.post("/ingest/{source_name}")
+async def receive_data(source_name: str, request: Request):
+    """Receive data from external sources. Matches to a source by name."""
     try:
         payload = await request.json()
     except Exception:
-        payload = {"raw": await request.body()}
+        payload = {"raw": (await request.body()).decode("utf-8", errors="replace")}
 
     with SessionLocal() as db:
-        mon = db.query(Monitor).filter(
-            Monitor.name == monitor_name,
-            Monitor.monitor_type == "webhook_in",
-            Monitor.enabled == True
+        src = db.query(Source).filter(
+            Source.name == source_name,
+            Source.collector_type == "webhook_in",
+            Source.enabled == True
         ).first()
 
-        if not mon:
-            raise HTTPException(status_code=404, detail=f"No active webhook_in monitor named '{monitor_name}'")
+        if not src:
+            raise HTTPException(status_code=404, detail=f"No active webhook_in source named '{source_name}'")
 
-        # Save the check
-        check = MonitorCheck(
-            monitor_id=mon.id,
-            status="up",
-            response_summary=f"Webhook received ({len(json.dumps(payload))} bytes)",
+        item = CollectedItem(
+            source_id=src.id, source_name=src.name, source_type="webhook_in",
+            title=payload.get("title", payload.get("event", "Webhook data")),
+            content=json.dumps(payload, indent=2)[:100000],
+            url=payload.get("url", ""),
+            published_at=datetime.utcnow(),
             raw_data=payload,
         )
-        db.add(check)
+        db.add(item)
         db.commit()
-        db.refresh(check)
+        db.refresh(item)
 
-        mon.last_check_at = datetime.utcnow()
-        mon.last_status = "up"
-        db.commit()
+        evaluate_items(src, [item])
 
-        evaluate_and_alert(mon, check, None)
-
-        return {"status": "ok", "monitor": monitor_name, "check_id": check.id}
+        return {"status": "ok", "source": source_name, "item_id": item.id}
 
 
 if __name__ == "__main__":
-    log("Pulse Webhook Gateway starting on port 8100...")
+    log("Pulse webhook gateway starting on port 8100...")
     uvicorn.run(app, host="0.0.0.0", port=8100)

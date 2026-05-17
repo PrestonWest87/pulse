@@ -6,9 +6,9 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from src.database import SessionLocal, init_db, Monitor, MonitorCheck
-from src.monitors import get_monitor
-from src.alert_engine import evaluate_and_alert
+from src.database import SessionLocal, init_db, Source, CollectionRun, CollectedItem
+from src.collectors import get_collector
+from src.alert_engine import evaluate_items
 
 init_db()
 
@@ -23,88 +23,114 @@ def log(msg, source="SCHEDULER"):
     logger.info(f"[{source}] {msg}")
 
 
-def run_monitor_check(monitor_id: int):
+def run_collector(source_id: int):
     with SessionLocal() as db:
-        mon = db.query(Monitor).filter_by(id=monitor_id).first()
-        if not mon or not mon.enabled:
+        src = db.query(Source).filter_by(id=source_id).first()
+        if not src or not src.enabled:
             return
 
         try:
-            monitor_cls = get_monitor(mon.monitor_type)
-            instance = monitor_cls(mon.config)
-            check_start = time.time()
-            result = instance.check()
-            elapsed_ms = round((time.time() - check_start) * 1000, 1)
+            collector_cls = get_collector(src.collector_type)
+            instance = collector_cls(src.config)
 
-            check = MonitorCheck(
-                monitor_id=mon.id,
+            start = time.time()
+            result = instance.collect()
+            duration = round((time.time() - start) * 1000, 1)
+
+            new_count = 0
+            new_items = []
+
+            for data in result.items:
+                # Dedup by content_hash
+                existing = db.query(CollectedItem).filter(
+                    CollectedItem.source_id == src.id,
+                    CollectedItem.content_hash == data.content_hash
+                ).first()
+                if existing:
+                    continue
+
+                item = CollectedItem(
+                    source_id=src.id,
+                    source_name=src.name,
+                    source_type=src.collector_type,
+                    title=data.title,
+                    content=data.content[:100000] if data.content else "",
+                    url=data.url,
+                    author=data.author,
+                    published_at=data.published_at,
+                    content_hash=data.content_hash,
+                    raw_data=data.raw_data,
+                )
+                db.add(item)
+                new_items.append(item)
+                new_count += 1
+
+            db.commit()
+
+            run = CollectionRun(
+                source_id=src.id,
                 status=result.status,
-                status_code=result.status_code,
-                response_time_ms=result.response_time_ms or elapsed_ms,
-                response_summary=result.response_summary,
+                items_found=len(result.items),
+                items_new=new_count,
+                response_summary=result.summary,
                 error=result.error,
-                raw_data=result.raw_data,
+                duration_ms=duration,
             )
-            db.add(check)
-            db.commit()
-            db.refresh(check)
-
-            mon.last_check_at = datetime.utcnow()
-            mon.last_status = result.status
-            mon.last_response_time_ms = result.response_time_ms or elapsed_ms
-            mon.last_error = result.error
-            mon.last_response_summary = result.response_summary
+            db.add(run)
+            src.last_run_at = datetime.utcnow()
+            src.last_status = result.status
+            src.last_error = result.error
             db.commit()
 
-            log(f"{mon.name} [{mon.monitor_type}]: {result.status} "
-                f"({result.response_time_ms or elapsed_ms}ms)"
-                + (f" - {result.error}" if result.error else ""))
+            log(f"{src.name} [{src.collector_type}]: {result.status}, "
+                f"{new_count} new / {len(result.items)} found ({duration}ms)"
+                + (f" — {result.error}" if result.error else ""))
 
-            evaluate_and_alert(mon, check, result)
+            if new_items:
+                evaluate_items(src, new_items)
 
         except Exception as e:
-            log(f"CRASH checking {mon.name}: {e}", "ERROR")
+            log(f"CRASH collecting {src.name}: {e}", "ERROR")
             import traceback
             traceback.print_exc()
-
-            check = MonitorCheck(
-                monitor_id=mon.id, status="error",
-                error=f"Monitor crashed: {e}"
-            )
+            run = CollectionRun(source_id=src.id, status="error", error=f"Crashed: {e}")
             with SessionLocal() as db2:
-                db2.add(check)
-                db2.commit()
+                db2.add(run)
+                try:
+                    src2 = db2.query(Source).filter_by(id=src.id).first()
+                    if src2:
+                        src2.last_status = "error"
+                        src2.last_error = str(e)[:500]
+                    db2.commit()
+                except Exception:
+                    db2.rollback()
 
 
 def reload_schedule():
     schedule.clear()
     with SessionLocal() as db:
-        monitors = db.query(Monitor).filter_by(enabled=True).all()
-        for mon in monitors:
-            interval = max(mon.interval_seconds or 300, 10)
-            job = schedule.every(interval).seconds.do(run_monitor_check, mon.id)
-            job.tag(f"monitor-{mon.id}")
-            log(f"Scheduled: {mon.name} [{mon.monitor_type}] every {interval}s")
-
-    log(f"Loaded {len(monitors)} active monitors")
+        sources = db.query(Source).filter_by(enabled=True).all()
+        for src in sources:
+            interval = max(src.interval_seconds or 900, 60)
+            schedule.every(interval).seconds.do(run_collector, src.id)
+            log(f"Scheduled: {src.name} [{src.collector_type}] every {interval}s")
+    log(f"Loaded {len(sources)} active sources")
 
 
 def background_reloader():
-    """Periodically reload the schedule to pick up new/changed monitors."""
     while True:
         time.sleep(60)
         reload_schedule()
 
 
 if __name__ == "__main__":
-    log("Pulse Scheduler starting...")
+    log("Pulse scheduler starting...")
     reload_schedule()
 
     import threading
-    reloader = threading.Thread(target=background_reloader, daemon=True)
-    reloader.start()
+    threading.Thread(target=background_reloader, daemon=True).start()
 
-    log("Scheduler online. Running checks...")
+    log("Scheduler online. Collecting data...")
     while True:
         schedule.run_pending()
         time.sleep(1)

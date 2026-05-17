@@ -6,8 +6,8 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 
 from src.database import (
-    SessionLocal, User, SystemConfig, Monitor, MonitorCheck,
-    Alert, NotificationChannel, NotificationRule, Keyword
+    SessionLocal, User, SystemConfig, Source, CollectionRun,
+    CollectedItem, Alert, NotificationChannel, NotificationRule
 )
 
 LOCAL_TZ = ZoneInfo("America/Chicago")
@@ -26,14 +26,6 @@ def to_dotdict(obj):
 
 def to_dotdict_list(objs):
     return [to_dotdict(obj) for obj in objs]
-
-
-def central_now():
-    return datetime.now(LOCAL_TZ)
-
-
-def utc_now():
-    return datetime.utcnow()
 
 
 def format_central(dt):
@@ -77,87 +69,101 @@ def update_user_password(user_id, new_password):
 
 
 # ==========================================
-# MONITORS
+# SOURCES (data sources to collect from)
 # ==========================================
 
-def get_monitors():
+def get_sources():
     with SessionLocal() as db:
-        return to_dotdict_list(db.query(Monitor).order_by(Monitor.name).all())
+        return to_dotdict_list(db.query(Source).order_by(Source.name).all())
 
 
-def get_monitor_by_id(monitor_id):
+def get_source_by_id(source_id):
     with SessionLocal() as db:
-        return to_dotdict(db.query(Monitor).filter_by(id=monitor_id).first())
+        return to_dotdict(db.query(Source).filter_by(id=source_id).first())
 
 
-def create_monitor(name, monitor_type, config, interval_seconds, severity, alert_on, description=""):
+def create_source(name, collector_type, config, interval_seconds, alert_severity="info", alert_on_keywords=None, description=""):
     with SessionLocal() as db:
-        mon = Monitor(
-            name=name, monitor_type=monitor_type, config=config,
-            interval_seconds=interval_seconds, severity=severity or "warning",
-            alert_on=alert_on or ["down", "error"], description=description,
+        src = Source(
+            name=name, collector_type=collector_type, config=config,
+            interval_seconds=interval_seconds, alert_severity=alert_severity or "info",
+            alert_on_keywords=alert_on_keywords or [], description=description,
         )
-        db.add(mon)
+        db.add(src)
         db.commit()
-        return mon.id
+        db.refresh(src)
+        return src.id
 
 
-def update_monitor(monitor_id, **kwargs):
+def delete_source(source_id):
     with SessionLocal() as db:
-        mon = db.query(Monitor).filter_by(id=monitor_id).first()
-        if not mon:
-            return False
-        for k, v in kwargs.items():
-            if hasattr(mon, k) and v is not None:
-                setattr(mon, k, v)
-        db.commit()
-        return True
-
-
-def delete_monitor(monitor_id):
-    with SessionLocal() as db:
-        mon = db.query(Monitor).filter_by(id=monitor_id).first()
-        if mon:
-            db.delete(mon)
+        src = db.query(Source).filter_by(id=source_id).first()
+        if src:
+            db.delete(src)
             db.commit()
             return True
     return False
 
 
-def toggle_monitor(monitor_id):
+def toggle_source(source_id):
     with SessionLocal() as db:
-        mon = db.query(Monitor).filter_by(id=monitor_id).first()
-        if mon:
-            mon.enabled = not mon.enabled
+        src = db.query(Source).filter_by(id=source_id).first()
+        if src:
+            src.enabled = not src.enabled
             db.commit()
-            return mon.enabled
+            return src.enabled
     return False
 
 
-def get_monitor_checks(monitor_id, limit=50):
+# ==========================================
+# COLLECTED ITEMS (search, browse)
+# ==========================================
+
+def get_recent_items(limit=100, source_id=None, search=None):
     with SessionLocal() as db:
-        return to_dotdict_list(
-            db.query(MonitorCheck)
-            .filter_by(monitor_id=monitor_id)
-            .order_by(MonitorCheck.checked_at.desc())
-            .limit(limit)
-            .all()
-        )
+        q = db.query(CollectedItem)
+        if source_id:
+            q = q.filter(CollectedItem.source_id == source_id)
+        if search:
+            like = f"%{search}%"
+            q = q.filter(
+                CollectedItem.title.ilike(like) |
+                CollectedItem.content.ilike(like) |
+                CollectedItem.url.ilike(like)
+            )
+        return to_dotdict_list(q.order_by(CollectedItem.published_at.desc()).limit(limit).all())
+
+
+def get_item_by_id(item_id):
+    with SessionLocal() as db:
+        return to_dotdict(db.query(CollectedItem).filter_by(id=item_id).first())
+
+
+def get_item_count():
+    with SessionLocal() as db:
+        return db.query(CollectedItem).count()
+
+
+def get_source_item_counts():
+    with SessionLocal() as db:
+        from sqlalchemy import func
+        results = db.query(CollectedItem.source_id, CollectedItem.source_name, func.count(CollectedItem.id)).group_by(CollectedItem.source_id).all()
+        return [(r[0], r[1], r[2]) for r in results]
 
 
 # ==========================================
 # ALERTS
 # ==========================================
 
-def get_alerts(limit=100, status=None, severity=None, monitor_id=None):
+def get_alerts(limit=100, status=None, severity=None, source_id=None):
     with SessionLocal() as db:
         q = db.query(Alert)
         if status:
             q = q.filter(Alert.status == status)
         if severity:
             q = q.filter(Alert.severity == severity)
-        if monitor_id:
-            q = q.filter(Alert.monitor_id == monitor_id)
+        if source_id:
+            q = q.filter(Alert.source_id == source_id)
         return to_dotdict_list(q.order_by(Alert.created_at.desc()).limit(limit).all())
 
 
@@ -231,10 +237,10 @@ def get_rules():
         return to_dotdict_list(db.query(NotificationRule).order_by(NotificationRule.name).all())
 
 
-def create_rule(name, monitor_id, channel_id, min_severity="warning", cooldown_minutes=5):
+def create_rule(name, source_id, channel_id, min_severity="info", cooldown_minutes=5):
     with SessionLocal() as db:
         rule = NotificationRule(
-            name=name, monitor_id=monitor_id, channel_id=channel_id,
+            name=name, source_id=source_id, channel_id=channel_id,
             min_severity=min_severity, cooldown_minutes=cooldown_minutes,
         )
         db.add(rule)
@@ -279,12 +285,3 @@ def update_config(**kwargs):
                 setattr(config, k, v)
         db.commit()
     st.cache_data.clear()
-
-
-# ==========================================
-# KEYWORDS (for content filtering legacy)
-# ==========================================
-
-def get_keywords():
-    with SessionLocal() as db:
-        return to_dotdict_list(db.query(Keyword).order_by(Keyword.word).all())
