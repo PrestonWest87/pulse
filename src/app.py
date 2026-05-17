@@ -174,7 +174,7 @@ elif page == "Sources":
             with col_b:
                 alert_sev = st.selectbox("Alert severity on keyword match", ["info", "warning", "critical"], index=0)
             keywords = st.text_input("Alert on keywords (comma-separated, leave blank for no alerts)",
-                                     placeholder="CVE, breach, critical, release")
+                                     placeholder="sale, update, patch notes, release")
 
             if st.form_submit_button("Create Source", use_container_width=True, type="primary"):
                 if not name:

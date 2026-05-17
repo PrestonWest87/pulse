@@ -1,14 +1,15 @@
-# Pulse — Universal Monitor & Alerting Platform
+# Pulse — Data Collector
 
-A general-purpose monitoring and alerting platform. Watch anything — RSS feeds, websites, APIs, TCP endpoints, or custom scripts — and get notified via webhooks, Slack, Discord, SMS, or email.
+Collect data from RSS feeds, web pages, release trackers, and HTTP endpoints.
+Everything collected is stored, searchable, and can trigger notifications on keyword matches.
 
-Built from the NOC Intelligence Fusion Center, generalized into a plugin-based universal monitor.
+Track game updates, Steam releases, news headlines, product deals, changelogs — anything you want.
 
 ## Architecture
 
 - **Frontend**: Streamlit dashboard on port 8501
-- **Worker**: Background scheduler for periodic checks
-- **Webhook**: FastAPI gateway on port 8100 (inbound + outbound)
+- **Worker**: Background scheduler for periodic collection
+- **Webhook**: FastAPI gateway on port 8100 (ingest data from external sources)
 - **Database**: SQLite (default) or PostgreSQL
 
 ## Quick Start
@@ -19,27 +20,33 @@ docker compose up --build -d
 
 Access the dashboard at `http://localhost:8501` (default: `admin` / `admin123`).
 
-## Monitor Types
+## Collector Types
 
-| Type | Description |
-|------|-------------|
-| RSS/Atom | Poll feeds for new entries |
-| HTTP Status | Check if a URL returns expected status |
-| HTTP JSON | Hit a REST API, evaluate JSON response |
-| Web Scrape | Fetch HTML, check for content patterns |
-| TCP Ping | Open TCP connection to host:port |
-| Script | Run a command/script, check exit code |
-| Webhook (inbound) | Listen for external system events |
+| Type | What it collects |
+|------|-----------------|
+| RSS / Atom | Feed entries from any RSS or Atom source |
+| Web Page | Page content snapshots with CSS selector extraction |
+| Release Tracker | New releases from GitHub, PyPI, npm, Docker Hub |
+| HTTP Endpoint | Response data from any URL or API |
+
+## Use Cases
+
+- Track new game releases or updates from Steam/Epic/Itch.io RSS feeds
+- Monitor GitHub releases for your favorite tools and libraries
+- Follow news headlines from any RSS source
+- Watch for price drops or deals on product pages
+- Collect changelogs and patch notes
+- Archive content from any website that updates regularly
 
 ## Notification Channels
 
-| Channel | Description |
+| Channel | Destination |
 |---------|-------------|
-| Outbound Webhook | POST JSON to any URL |
-| Slack | Incoming webhook integration |
-| Discord | Webhook integration with embeds |
-| SMS | Twilio-based text messaging |
-| Email | SMTP with TLS support |
+| Outbound Webhook | POST to any URL |
+| Slack | Incoming webhook |
+| Discord | Webhook with embeds |
+| SMS | Twilio text messaging |
+| Email | SMTP with TLS |
 
 ## License
 
